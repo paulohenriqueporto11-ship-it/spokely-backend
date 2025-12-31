@@ -23,20 +23,22 @@ const supabase = createClient(supabaseUrl, supabaseKey)
 
 // Rota de Teste (Raiz)
 fastify.get('/', async () => {
-  return { status: 'Online', system: 'Spokely MVP' }
+  return { status: 'Online', system: 'Spokely Backend' }
 })
 
-// --- SISTEMA DE FILA (LEGADO) ---
+// --- SISTEMA DE PERFIL E FILA ---
 fastify.post('/join-queue', async (request, reply) => {
   const { user_id } = request.body
   if (!user_id) return reply.status(400).send({ error: 'Falta user_id' })
 
+  // Cria perfil se não existir
   const { error: profileError } = await supabase
     .from('profiles')
     .upsert({ id: user_id, is_pro: false, xp: 0 }, { onConflict: 'id' })
   
-  if (profileError) return reply.status(400).send({ error: 'Erro perfil' })
+  if (profileError) return reply.status(400).send({ error: 'Erro ao criar perfil.' })
 
+  // Insere na fila
   const { error: queueError } = await supabase
     .from('queue')
     .insert({ user_id, status: 'waiting' })
@@ -44,7 +46,7 @@ fastify.post('/join-queue', async (request, reply) => {
   if (queueError && queueError.code !== '23505') {
     return reply.status(500).send({ error: 'Erro fila' })
   }
-  return { success: true }
+  return { success: true, message: 'Entrou na fila' }
 })
 
 fastify.get('/queue-status', async (request, reply) => {
@@ -59,21 +61,18 @@ fastify.get('/queue-status', async (request, reply) => {
   return { in_queue: true, ...data[0] }
 })
 
-// --- SISTEMA DE GAMIFICATION (XP) ---
+// --- SISTEMA DE QUIZ E GAMIFICATION ---
 
-// Rota 1: Completar Sessão de Foco (XP por tempo)
-fastify.post('/complete-session', async (request, reply) => {
-  const { user_id, minutes } = request.body
+// Rota Genérica: Dar XP (usada pelo Quiz e pelas Quests)
+fastify.post('/add-xp', async (request, reply) => {
+  const { user_id, xp_amount, source } = request.body // source é só pra log (ex: 'quiz', 'quest')
 
-  if (!user_id || !minutes) return reply.status(400).send({ error: 'Dados inválidos' })
+  if (!user_id || !xp_amount) return reply.status(400).send({ error: 'Dados inválidos' })
 
-  // Regra: 10 XP por minuto
-  const xpEarned = minutes * 10 
-
-  // Chama a função do banco
+  // Chama a função segura do banco
   const { data, error } = await supabase.rpc('add_xp', { 
     p_user_id: user_id, 
-    p_amount: xpEarned 
+    p_amount: xp_amount 
   })
 
   if (error) {
@@ -83,39 +82,23 @@ fastify.post('/complete-session', async (request, reply) => {
 
   return { 
     success: true, 
-    xp_earned: xpEarned,
     new_level: data[0].new_level,
     current_xp: data[0].new_xp,
     leveled_up: data[0].leveled_up 
   }
 })
 
-// Rota 2: Completar Quest Rápida (XP fixo)
+// Rota Legado (só pra não quebrar se tiver cache)
 fastify.post('/complete-quest', async (request, reply) => {
-  const { user_id, xp_amount } = request.body
-
-  if (!user_id || !xp_amount) return reply.status(400).send({ error: 'Dados inválidos' })
-
-  // Chama direto a função de adicionar XP
-  const { data, error } = await supabase.rpc('add_xp', { 
-    p_user_id: user_id, 
-    p_amount: xp_amount 
+  // Redireciona a lógica internamente
+  return await fastify.inject({
+    method: 'POST',
+    url: '/add-xp',
+    payload: request.body
   })
-
-  if (error) {
-    fastify.log.error(error)
-    return reply.status(500).send({ error: 'Erro ao salvar XP da quest' })
-  }
-
-  return { 
-    success: true, 
-    new_level: data[0].new_level,
-    current_xp: data[0].new_xp,
-    leveled_up: data[0].leveled_up 
-  }
 })
 
-// --- INICIAR SERVIDOR ---
+// --- START ---
 const start = async () => {
   try {
     await fastify.listen({ port: process.env.PORT || 3000, host: '0.0.0.0' })
