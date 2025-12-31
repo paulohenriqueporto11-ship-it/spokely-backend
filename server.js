@@ -3,17 +3,15 @@ const fastify = require('fastify')({ logger: true })
 const cors = require('@fastify/cors')
 const { createClient } = require('@supabase/supabase-js')
 
-// 1. Configurar CORS (Libera o Front para acessar o Back)
-fastify.register(cors, {
-  origin: true // Libera geral para o MVP
-})
+// 1. Configurar CORS
+fastify.register(cors, { origin: true })
 
-// 2. Configurar Supabase (Pega chaves do Render)
+// 2. Configurar Supabase
 const supabaseUrl = process.env.SUPABASE_URL
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE 
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error('ERRO CRÍTICO: Faltam as chaves do Supabase (URL ou KEY) no Render!')
+  console.error('ERRO CRÍTICO: Faltam as chaves do Supabase no Render!')
   process.exit(1)
 }
 
@@ -21,64 +19,42 @@ const supabase = createClient(supabaseUrl, supabaseKey)
 
 // --- ROTAS ---
 
-// Rota de Teste (Raiz)
-fastify.get('/', async () => {
-  return { status: 'Online', system: 'Spokely Backend' }
-})
+fastify.get('/', async () => { return { status: 'Online' } })
 
-// --- SISTEMA DE PERFIL E FILA ---
-fastify.post('/join-queue', async (request, reply) => {
-  const { user_id } = request.body
-  if (!user_id) return reply.status(400).send({ error: 'Falta user_id' })
-
-  // Cria perfil se não existir
-  const { error: profileError } = await supabase
-    .from('profiles')
-    .upsert({ id: user_id, is_pro: false, xp: 0 }, { onConflict: 'id' })
-  
-  if (profileError) return reply.status(400).send({ error: 'Erro ao criar perfil.' })
-
-  // Insere na fila
-  const { error: queueError } = await supabase
-    .from('queue')
-    .insert({ user_id, status: 'waiting' })
-
-  if (queueError && queueError.code !== '23505') {
-    return reply.status(500).send({ error: 'Erro fila' })
-  }
-  return { success: true, message: 'Entrou na fila' }
-})
-
-fastify.get('/queue-status', async (request, reply) => {
+// ROTA NOVA: BUSCAR PERFIL (Conserta o bug do "--")
+fastify.get('/get-profile', async (request, reply) => {
   const { user_id } = request.query
   if (!user_id) return reply.status(400).send({ error: 'Falta user_id' })
 
-  const { data, error } = await supabase.rpc('get_queue_position', { p_user_id: user_id })
-  
-  if (error) return reply.status(500).send({ error: 'Erro banco' })
-  if (!data || data.length === 0) return { in_queue: false }
-
-  return { in_queue: true, ...data[0] }
-})
-
-// --- SISTEMA DE QUIZ E GAMIFICATION ---
-
-// Rota Genérica: Dar XP (usada pelo Quiz e pelas Quests)
-fastify.post('/add-xp', async (request, reply) => {
-  const { user_id, xp_amount, source } = request.body // source é só pra log (ex: 'quiz', 'quest')
-
-  if (!user_id || !xp_amount) return reply.status(400).send({ error: 'Dados inválidos' })
-
-  // Chama a função segura do banco
-  const { data, error } = await supabase.rpc('add_xp', { 
-    p_user_id: user_id, 
-    p_amount: xp_amount 
-  })
+  // Busca os dados na tabela profiles
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('level, xp')
+    .eq('id', user_id)
+    .single()
 
   if (error) {
-    fastify.log.error(error)
-    return reply.status(500).send({ error: 'Erro ao salvar XP' })
+    // Se não achar, cria um perfil zerado na hora
+    if (error.code === 'PGRST116') {
+       await supabase.from('profiles').insert({ id: user_id, xp: 0, level: 1 })
+       return { level: 1, xp: 0 }
+    }
+    return reply.status(500).send({ error: 'Erro ao buscar perfil' })
   }
+
+  return data // Retorna { level: 5, xp: 350 }
+})
+
+// Rota de XP (Mantida igual)
+fastify.post('/add-xp', async (request, reply) => {
+  const { user_id, xp_amount } = request.body
+  if (!user_id || !xp_amount) return reply.status(400).send({ error: 'Dados inválidos' })
+
+  const { data, error } = await supabase.rpc('add_xp', { 
+    p_user_id: user_id, p_amount: xp_amount 
+  })
+
+  if (error) return reply.status(500).send({ error: 'Erro XP' })
 
   return { 
     success: true, 
@@ -86,16 +62,6 @@ fastify.post('/add-xp', async (request, reply) => {
     current_xp: data[0].new_xp,
     leveled_up: data[0].leveled_up 
   }
-})
-
-// Rota Legado (só pra não quebrar se tiver cache)
-fastify.post('/complete-quest', async (request, reply) => {
-  // Redireciona a lógica internamente
-  return await fastify.inject({
-    method: 'POST',
-    url: '/add-xp',
-    payload: request.body
-  })
 })
 
 // --- START ---
