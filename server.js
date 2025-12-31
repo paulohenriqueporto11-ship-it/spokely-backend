@@ -1,10 +1,16 @@
 // Importando as ferramentas
 const fastify = require('fastify')({ logger: true })
+const cors = require('@fastify/cors') // <--- NOVO: Importa o CORS
 const { createClient } = require('@supabase/supabase-js')
+
+// LIBERAR O CORS (Isso conserta o erro de conexão do Front)
+fastify.register(cors, {
+  origin: true // Libera para qualquer site acessar (perfeito pro MVP)
+})
 
 // Pegando as chaves do "cofre" (Variáveis de Ambiente do Render)
 const supabaseUrl = process.env.SUPABASE_URL
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE // Atenção: Usar a chave Service Role no Backend
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE 
 
 if (!supabaseUrl || !supabaseKey) {
   console.error('ERRO: Faltam as chaves do Supabase nas variáveis de ambiente!')
@@ -21,8 +27,6 @@ fastify.get('/', async (request, reply) => {
 
 // Rota 2: Consultar posição na fila (Polling)
 fastify.get('/queue-status', async (request, reply) => {
-  // Num cenário real, pegaríamos o ID do usuário via Token de Auth
-  // Para teste MVP, vamos passar o user_id na URL: /queue-status?user_id=...
   const { user_id } = request.query
 
   if (!user_id) {
@@ -42,7 +46,7 @@ fastify.get('/queue-status', async (request, reply) => {
   return data[0] 
 })
 
-// Ligando o servidor na porta que o Render mandar (ou 3000)
+// Ligando o servidor
 const start = async () => {
   try {
     await fastify.listen({ port: process.env.PORT || 3000, host: '0.0.0.0' })
