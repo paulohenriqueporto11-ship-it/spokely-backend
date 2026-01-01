@@ -18,7 +18,6 @@ fastify.get('/get-profile', async (request, reply) => {
   const { user_id } = request.query
   if (!user_id) return reply.status(400).send({ error: 'Falta ID' })
 
-  // Tenta buscar. Se não achar, cria.
   let { data, error } = await supabase
     .from('profiles')
     .select('current_level, xp, lives')
@@ -33,21 +32,77 @@ fastify.get('/get-profile', async (request, reply) => {
   return data 
 })
 
-// 2. PASSAR DE NÍVEL (A Mágica do Destravamento)
+// --- NOVA ROTA: PEGAR ATIVIDADE DO BANCO ---
+fastify.get('/get-activity', async (request, reply) => {
+  const { user_id, difficulty } = request.query
+  const diff = difficulty || 'easy' // Padrão easy se não vier nada
+
+  try {
+    // 1. Pega IDs que o usuário já respondeu
+    const { data: history } = await supabase
+      .from('user_history')
+      .select('question_id')
+      .eq('user_id', user_id)
+
+    const answeredIds = history ? history.map(h => h.question_id) : []
+    // Gambiarra técnica: Se a lista for vazia, o filtro "not.in" falha no supabase, então colocamos um ID falso
+    const filterIds = answeredIds.length > 0 ? answeredIds : ['00000000-0000-0000-0000-000000000000']
+
+    // 2. Busca 20 perguntas dessa dificuldade que NÃO estão no histórico
+    const { data: questions, error } = await supabase
+      .from('questions')
+      .select('*')
+      .eq('difficulty', diff)
+      .not('id', 'in', `(${filterIds.join(',')})`)
+      .limit(20)
+
+    if (error) throw error
+    if (!questions || questions.length < 5) {
+       return reply.send({ success: false, error: "Sem novas perguntas para esta dificuldade!" })
+    }
+
+    // 3. Embaralha e pega 5
+    const selected = questions.sort(() => 0.5 - Math.random()).slice(0, 5)
+
+    // 4. Formata para o Frontend
+    const formatted = selected.map(q => {
+      const opts = q.content.options
+      const ans = q.content.answer
+      return {
+        id: q.id,
+        t: q.content.question,
+        o: opts,
+        c: opts.indexOf(ans) // O frontend espera o índice (0, 1, 2, 3)
+      }
+    })
+
+    return { success: true, questions: formatted }
+
+  } catch (err) {
+    fastify.log.error(err)
+    return reply.status(500).send({ error: 'Erro no servidor' })
+  }
+})
+
+// 2. PASSAR DE NÍVEL (ATUALIZADO PARA SALVAR HISTÓRICO)
 fastify.post('/complete-level', async (request, reply) => {
-  const { user_id, xp_reward } = request.body
+  const { user_id, xp_reward, questions_ids } = request.body // Agora recebe IDs
   
-  // Busca dados atuais
+  // 1. Salva histórico para não repetir
+  if (questions_ids && questions_ids.length > 0) {
+      const inserts = questions_ids.map(qid => ({ user_id, question_id: qid }))
+      await supabase.from('user_history').insert(inserts)
+  }
+
+  // 2. Atualiza Nível e XP
   const { data: current } = await supabase
     .from('profiles').select('current_level, xp').eq('id', user_id).single()
 
   if (!current) return reply.status(400).send({ error: 'User not found' })
 
-  // Lógica Arcade: Sempre sobe 1 nível no mapa
   const nextLevel = current.current_level + 1
   const newXp = current.xp + (xp_reward || 50)
 
-  // Salva
   await supabase
     .from('profiles')
     .update({ current_level: nextLevel, xp: newXp })
