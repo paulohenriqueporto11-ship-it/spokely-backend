@@ -11,74 +11,62 @@ if (!supabaseUrl || !supabaseKey) process.exit(1)
 
 const supabase = createClient(supabaseUrl, supabaseKey)
 
-// --- ROTAS ---
-
 fastify.get('/', async () => { return { status: 'Online' } })
 
-// BUSCAR PERFIL COMPLETO
+// 1. BUSCAR DADOS (Load Inicial)
 fastify.get('/get-profile', async (request, reply) => {
   const { user_id } = request.query
-  if (!user_id) return reply.status(400).send({ error: 'Falta user_id' })
+  if (!user_id) return reply.status(400).send({ error: 'Falta ID' })
 
-  const { data, error } = await supabase
+  // Tenta buscar. Se não achar, cria.
+  let { data, error } = await supabase
     .from('profiles')
-    .select('level, xp, lives') // <--- Agora busca vidas
+    .select('current_level, xp, lives')
     .eq('id', user_id)
     .single()
 
-  if (error) {
-    if (error.code === 'PGRST116') {
-       // Cria perfil padrão se não existir
-       const newProfile = { id: user_id, xp: 0, level: 1, lives: 5 }
-       await supabase.from('profiles').insert(newProfile)
+  if (error || !data) {
+       const newProfile = { id: user_id, xp: 0, current_level: 1, lives: 5 }
+       await supabase.from('profiles').upsert(newProfile)
        return newProfile
-    }
-    return reply.status(500).send({ error: 'Erro perfil' })
   }
   return data 
 })
 
-// GANHAR XP (Passar de nível)
-fastify.post('/add-xp', async (request, reply) => {
-  const { user_id, xp_amount } = request.body
+// 2. PASSAR DE NÍVEL (A Mágica do Destravamento)
+fastify.post('/complete-level', async (request, reply) => {
+  const { user_id, xp_reward } = request.body
   
-  const { data, error } = await supabase.rpc('add_xp', { 
-    p_user_id: user_id, p_amount: xp_amount 
-  })
+  // Busca dados atuais
+  const { data: current } = await supabase
+    .from('profiles').select('current_level, xp').eq('id', user_id).single()
 
-  if (error) return reply.status(500).send({ error: 'Erro XP' })
+  if (!current) return reply.status(400).send({ error: 'User not found' })
 
-  return { 
-    success: true, 
-    new_level: data[0].new_level,
-    current_xp: data[0].new_xp
-  }
+  // Lógica Arcade: Sempre sobe 1 nível no mapa
+  const nextLevel = current.current_level + 1
+  const newXp = current.xp + (xp_reward || 50)
+
+  // Salva
+  await supabase
+    .from('profiles')
+    .update({ current_level: nextLevel, xp: newXp })
+    .eq('id', user_id)
+
+  return { success: true, new_level: nextLevel, current_xp: newXp }
 })
 
-// PERDER VIDA (Errou ou saiu)
+// 3. PERDER VIDA
 fastify.post('/lose-life', async (request, reply) => {
   const { user_id } = request.body
   
-  // 1. Busca vidas atuais
-  const { data: current, error: fetchError } = await supabase
-    .from('profiles')
-    .select('lives')
-    .eq('id', user_id)
-    .single()
+  const { data: current } = await supabase
+    .from('profiles').select('lives').eq('id', user_id).single()
 
-  if (fetchError || !current) return reply.status(500).send({ error: 'Erro ao buscar' })
-
-  // 2. Desconta (sem deixar baixar de 0)
-  let newLives = current.lives - 1
+  let newLives = (current?.lives || 5) - 1
   if (newLives < 0) newLives = 0
 
-  // 3. Salva
-  const { error: updateError } = await supabase
-    .from('profiles')
-    .update({ lives: newLives })
-    .eq('id', user_id)
-
-  if (updateError) return reply.status(500).send({ error: 'Erro ao atualizar' })
+  await supabase.from('profiles').update({ lives: newLives }).eq('id', user_id)
 
   return { success: true, lives: newLives }
 })
